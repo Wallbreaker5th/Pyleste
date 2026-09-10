@@ -1,4 +1,7 @@
+import copy
 import math
+
+from GameState import GameState, encode_attrs, decode_attrs
 
 
 def sin(x):
@@ -18,8 +21,8 @@ class Rect():
 
 class Celeste():
   def __init__(self, pico8):
-    global p8, g
-    p8, g = pico8, self
+    # every game keeps a reference to its own console instead of using globals
+    self.p8 = pico8
 
     # game globals
     self.room = Vector(0, 0)
@@ -53,6 +56,22 @@ class Celeste():
       #96: self.big_chest,
       #118: self.flag
     }
+
+    # types used when restoring a saved game state (see get_state/set_state)
+    self.object_types = {
+      'player_spawn': self.player_spawn,
+      'player': self.player,
+      'balloon': self.balloon,
+      'platform': self.platform,
+      'fruit': self.fruit,
+      'fly_fruit': self.fly_fruit,
+      'fake_wall': self.fake_wall,
+      'spring': self.spring,
+      'fall_floor': self.fall_floor,
+      'key': self.key,
+      'chest': self.chest
+    }
+    self.value_types = {'Vector': Vector, 'Rect': Rect}
 
   # entry point
 
@@ -126,7 +145,7 @@ class Celeste():
     self.room.y = y
     for tx in range(16):
       for ty in range(16):
-        tile = p8.mget(self.room.x * 16 + tx, self.room.y * 16 + ty)
+        tile = self.p8.mget(self.room.x * 16 + tx, self.room.y * 16 + ty)
         if tile in self.tiles:
           self.init_object(self.tiles[tile], tx * 8, ty * 8, tile)
 
@@ -145,17 +164,17 @@ class Celeste():
       self.rem = Vector(0.0, 0.0)
 
     def is_solid(self, ox, oy):
-      if oy > 0 and not self.check(g.platform, ox, 0) and self.check(g.platform, ox, oy):
+      if oy > 0 and not self.check(self.game.platform, ox, 0) and self.check(self.game.platform, ox, oy):
         return True
-      return g.tile_flag_at(self.x + self.hitbox.x + ox, self.y + self.hitbox.y + oy, self.hitbox.w, self.hitbox.h, 0)\
-        or self.check(g.fall_floor, ox, oy)\
-        or self.check(g.fake_wall, ox, oy)
+      return self.game.tile_flag_at(self.x + self.hitbox.x + ox, self.y + self.hitbox.y + oy, self.hitbox.w, self.hitbox.h, 0)\
+        or self.check(self.game.fall_floor, ox, oy)\
+        or self.check(self.game.fake_wall, ox, oy)
 
     def is_ice(self, ox, oy):
-      return g.tile_flag_at(self.x + self.hitbox.x + ox, self.y + self.hitbox.y + oy, self.hitbox.w, self.hitbox.h, 4)
+      return self.game.tile_flag_at(self.x + self.hitbox.x + ox, self.y + self.hitbox.y + oy, self.hitbox.w, self.hitbox.h, 4)
 
     def check(self, obj, ox, oy):
-      for other in g.objects:
+      for other in self.game.objects:
         if type(other) == obj and other != self and other.collideable and \
          other.x + other.hitbox.x + other.hitbox.w > self.x + self.hitbox.x + ox and \
          other.y + other.hitbox.y + other.hitbox.h > self.y + self.hitbox.y + oy and \
@@ -176,7 +195,7 @@ class Celeste():
 
     def move_x(self, amt, start):
       if self.solids:
-        step = g.sign(amt)
+        step = self.game.sign(amt)
         for i in range(start, abs(amt) + 1):
           if not self.is_solid(step, 0):
             self.x += step
@@ -189,7 +208,7 @@ class Celeste():
 
     def move_y(self, amt):
       if self.solids:
-        step = g.sign(amt)
+        step = self.game.sign(amt)
         for i in range(abs(amt) + 1):
           if not self.is_solid(0, step):
             self.y += step
@@ -203,10 +222,20 @@ class Celeste():
     def __str__(self):
       return f'[{self.__class__.__name__}] x: {self.x}, y: {self.y}, rem: {{{self.rem.x:.4f}, {self.rem.y:.4f}}}, spd: {{{self.spd.x:.4f}, {self.spd.y:.4f}}}'
 
+    def __deepcopy__(self, memo):
+      # [change] copies (e.g. the ones searched from) must reference the same
+      # game, rather than deep copying it along with the object
+      copy_of_self = type(self).__new__(type(self))
+      memo[id(self)] = copy_of_self
+      for key, value in self.__dict__.items():
+        setattr(copy_of_self, key, value if key == 'game' else copy.deepcopy(value, memo))
+      return copy_of_self
+
   # objects
 
   class player_spawn(base_obj):
     def init(self):
+      self.spr = 3
       self.target = self.y
       self.y = 128
       self.spd.y = -4
@@ -237,8 +266,8 @@ class Celeste():
       elif self.state == 2:
         self.delay -= 1
         if self.delay < 0:
-          g.destroy_object(self)
-          g.init_object(g.player, self.x, self.y)
+          self.game.destroy_object(self)
+          self.game.init_object(self.game.player, self.x, self.y)
 
   class player(base_obj):
     def init(self):
@@ -253,27 +282,30 @@ class Celeste():
       self.dash_accel = Vector(0.0, 0.0)
       self.hitbox = Rect(1, 3, 6, 5)
       self.solids = True
+      # [change] animation state, used when rendering
+      self.spr = 1
+      self.spr_off = 0.0
 
     def update(self):
       # horizontal input
-      h_input = 1 if p8.btn(g.k_right) else -1 if p8.btn(g.k_left) else 0
+      h_input = 1 if self.game.p8.btn(self.game.k_right) else -1 if self.game.p8.btn(self.game.k_left) else 0
 
       # spike collision
-      if g.spikes_at(self.x + self.hitbox.x, self.y + self.hitbox.y, self.hitbox.w, self.hitbox.h, self.spd.x, self.spd.y):
-        g.kill_player(self)
+      if self.game.spikes_at(self.x + self.hitbox.x, self.y + self.hitbox.y, self.hitbox.w, self.hitbox.h, self.spd.x, self.spd.y):
+        self.game.kill_player(self)
 
       # bottom death
       if self.y > 128:
-        g.kill_player(self)
+        self.game.kill_player(self)
 
       # on ground check
       on_ground = self.is_solid(0, 1)
 
       # jump and dash inmput
-      jump = p8.btn(g.k_jump) and not self.p_jump
-      dash = p8.btn(g.k_dash) and not self.p_dash
-      self.p_jump = p8.btn(g.k_jump)
-      self.p_dash = p8.btn(g.k_dash)
+      jump = self.game.p8.btn(self.game.k_jump) and not self.p_jump
+      dash = self.game.p8.btn(self.game.k_dash) and not self.p_dash
+      self.p_jump = self.game.p8.btn(self.game.k_jump)
+      self.p_dash = self.game.p8.btn(self.game.k_dash)
 
       # jump buffer
       if jump:
@@ -284,7 +316,7 @@ class Celeste():
       # grace frames and dash restoration
       if on_ground:
         self.grace = 6
-        self.djump = g.max_djump
+        self.djump = self.game.max_djump
       elif self.grace > 0:
         self.grace -= 1
 
@@ -293,15 +325,15 @@ class Celeste():
 
       if self.dash_time > 0:
         self.dash_time -= 1
-        self.spd.x = g.appr(self.spd.x, self.dash_target.x, self.dash_accel.x)
-        self.spd.y = g.appr(self.spd.y, self.dash_target.y, self.dash_accel.y)
+        self.spd.x = self.game.appr(self.spd.x, self.dash_target.x, self.dash_accel.x)
+        self.spd.y = self.game.appr(self.spd.y, self.dash_target.y, self.dash_accel.y)
       else:
         maxrun = 1
         accel = (0.6 if not self.is_ice(0, 1) else 0.05) if on_ground else 0.4
         deccel = 0.15
 
         # set x speed
-        self.spd.x = g.appr(self.spd.x, h_input * maxrun, accel) if abs(self.spd.x) <= 1 else g.appr(self.spd.x, g.sign(self.spd.x) * maxrun, deccel)
+        self.spd.x = self.game.appr(self.spd.x, h_input * maxrun, accel) if abs(self.spd.x) <= 1 else self.game.appr(self.spd.x, self.game.sign(self.spd.x) * maxrun, deccel)
 
         # facing direction
         if self.spd.x != 0:
@@ -312,7 +344,7 @@ class Celeste():
 
         # apply gravity
         if not on_ground:
-          self.spd.y = g.appr(self.spd.y, maxfall, 0.21 if abs(self.spd.y) > 0.15 else 0.105)
+          self.spd.y = self.game.appr(self.spd.y, maxfall, 0.21 if abs(self.spd.y) > 0.15 else 0.105)
 
         # jump
         if self.jbuffer > 0:
@@ -334,28 +366,42 @@ class Celeste():
         if self.djump > 0 and dash:
           self.djump -= 1
           self.dash_time = 4
-          g.has_dashed = True
+          self.game.has_dashed = True
           self.dash_effect_time = 10
           # vertical input
-          v_input = -1 if p8.btn(g.k_up) else 1 if p8.btn(g.k_down) else 0
+          v_input = -1 if self.game.p8.btn(self.game.k_up) else 1 if self.game.p8.btn(self.game.k_down) else 0
           # calculate dash speeds
           self.spd.x = h_input * (d_full if v_input == 0 else d_half) if h_input != 0 else (0 if v_input != 0 else -1 if self.flip.x else 1)
           self.spd.y = v_input * (d_full if h_input == 0 else d_half) if v_input != 0 else 0
           # effects
-          g.freeze = 2
+          self.game.freeze = 2
           # dash target speeds and accels
-          self.dash_target.x = 2 * g.sign(self.spd.x)
-          self.dash_target.y = (2 if self.spd.y >= 0 else 1.5) * g.sign(self.spd.y)
+          self.dash_target.x = 2 * self.game.sign(self.spd.x)
+          self.dash_target.y = (2 if self.spd.y >= 0 else 1.5) * self.game.sign(self.spd.y)
           self.dash_accel.x = 1.5 if self.spd.y == 0 else 1.06066017177
           self.dash_accel.y = 1.5 if self.spd.x == 0 else 1.06066017177
 
+      # animation (kept in the update loop, like vanilla, so that it only
+      # depends on the game state and not on when the game is rendered)
+      self.spr_off += 0.25
+      if not on_ground:
+        self.spr = 5 if self.is_solid(h_input, 0) else 3 # wall slide or mid air
+      elif self.game.p8.btn(self.game.k_down):
+        self.spr = 6 # crouch
+      elif self.game.p8.btn(self.game.k_up):
+        self.spr = 7 # look up
+      elif self.spd.x != 0 and h_input != 0:
+        self.spr = 1 + int(self.spr_off % 4) # walk
+      else:
+        self.spr = 1 # stand
+
       # exit level off the top
       if self.y < -4:
-        g.next_room()
+        self.game.next_room()
 
     def draw(self):
       if self.x < -1 or self.x > 121:
-        self.x = g.clamp(self.x, -1, 121)
+        self.x = self.game.clamp(self.x, -1, 121)
         self.spd.x = 0
 
   class balloon(base_obj):
@@ -366,9 +412,9 @@ class Celeste():
 
     def update(self):
       if self.spr == 22:
-        hit = self.check(g.player, 0, 0)
-        if hit and hit.djump < g.max_djump:
-          hit.djump = g.max_djump
+        hit = self.check(self.game.player, 0, 0)
+        if hit and hit.djump < self.game.max_djump:
+          hit.djump = self.game.max_djump
           self.spr = 0
           self.timer = 60
       elif self.timer > 0:
@@ -389,8 +435,8 @@ class Celeste():
         self.x = 128
       elif self.x > 128:
         self.x = -16
-      if not self.check(g.player, 0, 0):
-        hit = self.check(g.player, 0, -1)
+      if not self.check(self.game.player, 0, 0):
+        hit = self.check(self.game.player, 0, -1)
         if hit:
           hit.move_x(self.x - self.last, 1)
       self.last = self.x
@@ -401,10 +447,10 @@ class Celeste():
       self.off = 0
 
     def update(self):
-      hit = self.check(g.player, 0, 0)
+      hit = self.check(self.game.player, 0, 0)
       if hit:
-        hit.djump = g.max_djump
-        g.destroy_object(self)
+        hit.djump = self.game.max_djump
+        self.game.destroy_object(self)
       self.off += 1
       self.y = self.start + sin(self.off / 40) * 2.5
 
@@ -413,33 +459,34 @@ class Celeste():
       self.fly = False
       self.step = 0.5
       self.solids = False
+      self.start = self.y
 
     def update(self):
       if self.fly:
-        self.spd.y = g.appr(self.spd.y, -3.5, 0.25)
+        self.spd.y = self.game.appr(self.spd.y, -3.5, 0.25)
         if self.y < -16:
-          g.destroy_object(self)
+          self.game.destroy_object(self)
       else:
-        if g.has_dashed:
+        if self.game.has_dashed:
           self.fly = True
         self.step += 0.05
         self.spd.y = sin(self.step) * 0.5
-      hit = self.check(g.player, 0, 0)
+      hit = self.check(self.game.player, 0, 0)
       if hit:
-        hit.djump = g.max_djump
-        g.destroy_object(self)
+        hit.djump = self.game.max_djump
+        self.game.destroy_object(self)
 
   class fake_wall(base_obj):
     def update(self):
       self.hitbox.w = 18
       self.hitbox.h = 18
-      hit = self.check(g.player, -1, -1)
+      hit = self.check(self.game.player, -1, -1)
       if hit and hit.dash_effect_time > 0:
-        hit.spd.x = -g.sign(hit.spd.x) * 1.5
+        hit.spd.x = -self.game.sign(hit.spd.x) * 1.5
         hit.spd.y = -1.5
         hit.dash_time = -1
-        g.init_object(g.fruit, self.x + 4, self.y + 4, 26)
-        g.destroy_object(self)
+        self.game.init_object(self.game.fruit, self.x + 4, self.y + 4, 26)
+        self.game.destroy_object(self)
       self.hitbox.w = 16
       self.hitbox.h = 16
 
@@ -454,17 +501,17 @@ class Celeste():
         if self.hide_for <= 0:
           self.delay = 0
       elif self.spr == 18:
-        hit = self.check(g.player, 0, 0)
+        hit = self.check(self.game.player, 0, 0)
         if hit and hit.spd.y >= 0:
           self.spr = 19
           hit.y = self.y - 4
           hit.spd.x *= 0.2
           hit.spd.y = -3
-          hit.djump = g.max_djump
+          hit.djump = self.game.max_djump
           self.delay = 10
-          below = self.check(g.fall_floor, 0, 1)
+          below = self.check(self.game.fall_floor, 0, 1)
           if below:
-            g.break_fall_floor(below)
+            self.game.break_fall_floor(below)
       elif self.delay > 0:
         self.delay -= 1
         if self.delay <= 0:
@@ -481,8 +528,8 @@ class Celeste():
 
     def update(self):
       if self.state == 0:
-        if self.check(g.player, 0, -1) or self.check(g.player, -1, 0) or self.check(g.player, 1, 0):
-          g.break_fall_floor(self)
+        if self.check(self.game.player, 0, -1) or self.check(self.game.player, -1, 0) or self.check(self.game.player, 1, 0):
+          self.game.break_fall_floor(self)
       elif self.state == 1:
         self.delay -= 1
         if self.delay <= 0:
@@ -492,7 +539,7 @@ class Celeste():
           self.spr = 0
       elif self.state == 2:
         self.delay -= 1
-        if self.delay <= 0 and not self.check(g.player, 0, 0):
+        if self.delay <= 0 and not self.check(self.game.player, 0, 0):
           self.state = 0
           self.collideable = True
           self.spr = 23
@@ -504,15 +551,15 @@ class Celeste():
     if obj.state == 0:
       obj.state = 1
       obj.delay = 15
-      hit = obj.check(g.spring, 0, -1)
+      hit = obj.check(self.spring, 0, -1)
       if hit:
-        g.break_spring(hit)
+        self.break_spring(hit)
 
   class key(base_obj):
     def update(self):
-      if self.check(g.player, 0, 0):
-        g.destroy_object(self)
-        g.has_key = True
+      if self.check(self.game.player, 0, 0):
+        self.game.destroy_object(self)
+        self.game.has_key = True
 
   class chest(base_obj):
     def init(self):
@@ -520,19 +567,20 @@ class Celeste():
       self.timer = 20
 
     def update(self):
-      if g.has_key:
+      if self.game.has_key:
         self.timer -= 1
         if self.timer <= 0:
-          f = g.init_object(g.fruit, self.x, self.y - 4, 26)
+          f = self.game.init_object(self.game.fruit, self.x, self.y - 4, 26)
           # [change] remove rng, expand fruit hitbox to cover all outcomes
           f.hitbox.x -= 1
           f.hitbox.w += 3
-          g.destroy_object(self)
+          self.game.destroy_object(self)
 
   # object handling stuff
 
   def init_object(self, obj, x, y, tile=None):
     o = obj(x, y, tile)
+    o.game = self # [change] objects know their game instead of using a global
     self.objects.append(o)
     if callable(getattr(o, 'init', None)):
       o.init()
@@ -541,6 +589,37 @@ class Celeste():
   def destroy_object(self, obj):
     # [change] remove from list later so update loop doesn't skip
     self.objects[self.objects.index(obj)] = None
+
+  # game state
+
+  def get_state(self):
+    # a snapshot of everything needed to continue the game later on
+    objects = [{'type': type(o).__name__, 'attrs': encode_attrs(vars(o), skip=('game',))}
+      for o in self.objects if o is not None]
+    attrs = {
+      'frames': self.frames,
+      'freeze': self.freeze,
+      'delay_restart': self.delay_restart,
+      'next_rm': self.next_rm,
+      'max_djump': self.max_djump,
+      'has_dashed': self.has_dashed,
+      'has_key': self.has_key
+    }
+    return GameState(room=(self.room.x, self.room.y), objects=objects, attrs=attrs)
+
+  def set_state(self, state):
+    # restore a snapshot into this game (it may come from another instance)
+    registry = dict(self.object_types, **self.value_types)
+    self.room = Vector(*state.room)
+    for key, value in state.attrs.items():
+      setattr(self, key, value)
+    self.objects = []
+    for obj in state.objects:
+      o = self.object_types[obj['type']].__new__(self.object_types[obj['type']])
+      o.game = self
+      for key, value in decode_attrs(obj['attrs'], registry).items():
+        setattr(o, key, value)
+      self.objects.append(o)
 
   def kill_player(self, obj):
     self.destroy_object(obj)
@@ -565,12 +644,12 @@ class Celeste():
   def tile_flag_at(self, x, y, w, h, flag):
     for i in range(max(0, int(x / 8)), int(min(15, (x + w - 1) / 8)) + 1):
       for j in range(max(0, int(y / 8)), int(min(15, (y + h - 1) / 8)) + 1):
-        if p8.fget(self.tile_at(i, j), flag):
+        if self.p8.fget(self.tile_at(i, j), flag):
           return True
     return False
 
   def tile_at(self, x, y):
-    return p8.mget(self.room.x * 16 + x, self.room.y * 16 + y)
+    return self.p8.mget(self.room.x * 16 + x, self.room.y * 16 + y)
 
   def spikes_at(self, x, y, w, h, spdx, spdy):
     for i in range(max(0, int(x / 8)), int(min(15, (x + w - 1) / 8)) + 1):
@@ -582,6 +661,112 @@ class Celeste():
          (tile == 59 and ((x + w - 1) % 8 >= 6 or x + w == i * 8 + 8) and spdx >= 0):
           return True
     return False
+
+  # rendering
+
+  # draw the current game state onto the console's screen
+  # this is what the render interface (PICO8.render) uses; it does not touch
+  # the simulation (vanilla draws clouds, particles and maddy's hair from its
+  # draw loop, Pyleste does not simulate those)
+  def _render(self):
+    p8 = self.p8
+    p8.cls(0) # background
+    # room terrain: background tiles first, then the solid terrain over them
+    rx, ry = self.room.x * 16, self.room.y * 16
+    p8.map(rx, ry, 0, 0, 16, 16, 4)
+    for o in self.objects:
+      if type(o) == self.platform: # cloud platforms are drawn behind the terrain
+        self.draw_object(o)
+    p8.map(rx, ry, 0, 0, 16, 16, 2)
+    for o in self.objects:
+      if type(o) != self.platform:
+        self.draw_object(o)
+
+  # draw a single object with its sprite(s)
+  def draw_object(self, obj):
+    if obj is None or not obj.spr:
+      return
+    if type(obj) == self.fake_wall:
+      self.p8.spr(obj.spr, obj.x, obj.y, 2, 2) # 2x2 blocks
+    elif type(obj) == self.platform:
+      self.p8.spr(11, obj.x, obj.y - 1, 2, 1) # cloud platform
+    elif type(obj) == self.fly_fruit:
+      self.p8.spr(obj.spr, obj.x, obj.y, 1, 1, obj.flip.x, obj.flip.y)
+      wing = 45 if self.has_dashed or sin(obj.step) >= 0 else 47 if obj.y > obj.start else 46
+      self.p8.spr(wing, obj.x - 6, obj.y - 2, 1, 1, True)
+      self.p8.spr(wing, obj.x + 6, obj.y - 2)
+    else:
+      self.p8.spr(obj.spr, obj.x, obj.y, 1, 1, obj.flip.x, obj.flip.y)
+
+  # [change] sprite sheet (128x128 pixels, one hex digit per pixel), from the cart's __gfx__ section
+  @property
+  def gfx_data(self):
+    return '''
+000000000000000000000000088888800000000000000000000000000000000000aaaaa0000aaa000000a0000007707770077700000060000000600000060000000000000888888008888880888888880888888008888800000000000888888000a000a0000a0a000000a0000777777677777770000060000000600000060000
+000000008888888888888888888ffff888888888888888800888888088f1ff1800a909a0000a0a000000a000776666666776777700060000000060000006000000000000888ffff8888ffff888f1ff18888ffff88ffff8808888888888fffff8009aaa900009a9000000a0007677766676666677000600000000600000060000
+0000000088f1ff1888f1ff1808fffff088f1ff1881ff1f80888ffff888fffff80000a0000000a0000000a00000000000000000000006000000060000000060000000000008fffff008fffff00033330008fffff00fffff8088fffff8083333800099a0000009a0000000a0000000000000000000000600000006000000006000
+00000000003333000033330007000070073333000033337008f1ff10003333000009a0000000a0000000a0000000000000000000000060000006000000006000000000000070070000700070000000000000070000007000077333700070070000aaa0000009a0000000a0000000000000000000000060000006000000006000
+555555550000000000000000000000000000000000000000008888004999999449999994499909940300b0b0666566650300b0b000000000000000007000000055555555000000000000000000000000000000000000000008888880911111199111411991140919003b330067656765003b3300007700000770070007000007
+550000550000000000000000000000000aaaaaa0000000000878888091111119911191194940041902888820677067700288882000777070077700000000000055000055007000700499994000000000a998888a1111111108888880911111199494041900000044089888800700070078988887077777700770000000000000
+55000055007000700050050000000000a988888a100000010888888091111119911409499400000008888980070007007888898707777770000070000000000055000055067706770005500000000000aaaaaaaa1111111108888880911111199111911991400499088988800000000008898880077777700000077000000000
+55555555567656760050050000000000a980088a144444410088880091111119911411199140411902888820000000000288882007077700000707700700007055555555566656660005500004999940a988888a1444444100000000499999944999999444004994002882000000000000288200000000007000000000000000
+5777777557777777777777777777777577cccccccccccccccccccc7757777775555555555555555555555555550000000777777000000000000000000000000077777777777777777777777777777777777cccccccccccccccccc777777777775555555555555550055555556670000077777777000777770000000000000000
+777c77777777ccccc777777ccccc7777777cccccccccccccccccc77777777777555555555555550000555555677770007777777700776670000000000000000077cccc77777cccccccc77cccccccc7777777cccccccccccccccc7777777cc7775555555555555000000555556660000077773377076777000000000000000000
+77cccc7777cccccccccccccccccccc777777cccccccccccccccc777777cccc775555555555550000000055555500000077773377077660000777770000000000777cc77777cc77ccccccccccccc7cc77777cccccccccccccccccc77777cccc775555555555500000000005556670000073773337077770000777767007700000
+7777777777cc77cccccccccccccccc77777cccccccccccccccccc77777c7cc77555555555500000000000055677770007333bb370000000000000077007777705777777577cccccccccccccccccccc7777cccccccccccccccccccc7777cccc77555555555000000000000005666000000333bb30000000000000000000077777
+77cccc7777cccccccccccccccccccc77577777777777777777777775777ccc775555555550000000000000050000066603333330000000000000000000000000777ccc7777cccccccccccccccccccc77777777777777777777777777777cc7775055555555000000000000550007777603b333300000000000ee0ee000000000
+777ccc7777cc7cccccccccccc77ccc777777ccc7777777777ccc7777777cc77755550055555000000000055500000766033333300000000000eeeee00000003077ccc77777ccccccccccccccc77ccc77777ccccc7c7777ccccccc77777ccc777555500555555000000005555000000550333b33000000000000e8e00000000b0
+77ccc777777cccccccc77cccccccc777777ccccccc7777c7ccccc77777cccc7755555555555550000005555500000666003333000000b00000eeeee000000b30777cc7777777ccccc777777ccccc77777777ccc7777777777ccc777777cccc775505555555555500005555550007777600044000000b000000ee3ee003000b00
+777cc777777777777777777777777777777777777777777777777777777cc7775555555555555550055555550000076600044000030b00300000b00000b0b30077cccc77577777777777777777777775577777777777777777777775577777755555555555555555555555550000005500999900030330300000b00000303300
+5777755777577775077777777777777777777770077777700000000000000000cccccccc000000000000000000000000000000000000000000000000000000007777777777777777700007770000777000007777700077770000000000000000c77ccccc00000000000000000000000000000000000000000000000000000000
+7777cc7777cc777770cc777cccc777ccccc7770770c777070000000000000000c77cc7cc00000000000000000000000000000000000000000000000000000000777cccccccccc77770c777cccc777ccccc777c0770777c070000000000000000cccccccc00000000000000000000000000006000000000000000000000000000
+77cccccccccccc77707770000777000007770007777700070002eeeeeeee2000cccccccc0000000000000000000000000006060000000000000000000000000057cc77ccccc7cc7577770000777000007770000777700007002eeeeeeeeee200cc7ccccc00000000000000000000000000d00060000000000000000000000000
+577c77ccccccc7757000000000000000000c000770000c0700eeeeeeeeeeee00ccccc7cc0000000000000000000000000d00000c000000000000000000000000777cccccccccc7777000000000000000000000077000000700e22222e2e22e00cccccccc000000000000000000000000d000000c000000000000000000000000
+777cccccccccc7777000000000000000000000077000000700eeeeeeeeeeee000000000000000000000000000000000c0000000c000600000000000000000000577cccccccccc7777000000c000000000000000770cc000700e22e2222e22e00000000000000000000000000000000d000000000c060d0000000000000000000
+57cc7cccc77ccc7570000000000cc0000000000770cc000700eeeeeeeeeeee0000000000000000000000000000000c00000000000d000d00000000000000000077ccccccc77ccc7770c00000000cc00000000c0770000c0700eee222e22eee0000000000000000000000000000000c0000000000000000000000000000000000
+777cccccccccc7777000000000000000000000077000000700eeeeeeeeeeee005555555506666600666666006600c000666666000666660066666600666666007777cc7777cc777770000000000000000000000770c0000700eeeeeeeeeeee00555555556666666066666660660c000066666660666666606666666066666660
+777777777777777770000000c0000000000000077000000700ee77eee7777e00555555556600066066000000660000006600000066000000006600006600000057777577775577757000000000000000000000077000c007077777777777777055555555dd000000dddd0000dd000000dddd0000ddddddd000dd0000dddd0000
+000000000000000070000000000000000000000770000007007777005000000000000005dd000dd0dd000000dd0000d0dd000000000000d000dd0000dd00000000aaaaaaaaaaaa00700000000000000000000007700c0007070000705500000000000055ddddddd0dddddd00ddddddd0dddddd00ddddddd000dd0000dddddd00
+0a999999999999a0700000000000c00000000007700000077077000755500000000005550ddddd00ddddddd0ddddddd0ddddddd00ddddd0000dd0000ddddddd0a99aaaaaaaaaa99a7000000cc0000000000000077000cc077077bb07555500000000555500000000000000000000000000000000000000000000000000000000
+a9aaaaaaaaaaaa9a7000000cc0000000000c00077000cc07700bbb0755555555555555550000000000000c000000000000000000000000000000c00000000000a99999999999999a70c00000000000000000000770c00007700bbb075555555555555555000000000000c00000000000000000000000000000000c0000000000
+a99999999999999a700000000000000000000007700000070700007055555555555555550000000000cc0000000000000000000000000000000000c000000000a99999999999999a07777777777777777777777007777770007777005555555555555555000000000c000000000000000000000000000000000000c000000000
+aaaaaaaaaaaaaaaa07777777777777777777777007777770004bbb00004b000000400bbb00000000c0000000000000000000000000000000000000c000000000a49494a11a49494a70007770000077700000777770007777004bbbbb004bb000004bbbbb0000000100000000000000000000000000000000000000c00c000000
+a494a4a11a4a494a70c777ccccc777ccccc7770770c7770704200bbb042bbbbb042bbb00000000c0000000000000000000000000000000000000001010c00000a49444aaaa44494a70777ccccc777ccccc777c0770777c07040000000400bbb004000000000001000000000000000000000000000000000000000001000c0000
+a49999aaaa99994a7777000007770000077700077777000704000000040000000400000000000100000000000000000000000000000000000000000000010000a49444999944494a77700000777000007770000777700c0742000000420000004200000000000100000000000000000000000000000000000000000000001000
+a494a444444a494a7000000000000000000000077000000740000000400000004000000000000000000000000000000000000000000000000000000000000000a49499999999494a0777777777777777777777700777777040000000400000004000000000010000000000000000000000000000000000000000000000000010
+00000000000000008242525252528452339200001323232352232323232352230000000000000000b302000013232352526200a282834252522323232323232300000000000000a20182920013232352363636462535353545550000005525355284525262b20000000000004252525262828282425284525252845252525252
+00000000000085868242845252525252b1006100b1b1b1b103b1b1b1b1b103b100000000000000111102000000a282425233000000a213233300009200008392000000000000110000a2000000a28213000000002636363646550000005525355252528462b2a300000000004252845262828382132323232323232352528452
+000000000000a201821323525284525200000000000000007300000000007300000000000000b343536300410000011362b2000000000000000000000000a2000000000000b302b2002100000000a282000000000000000000560000005526365252522333b28292001111024252525262019200829200000000a28213525252
+0000000000000000a2828242525252840000000000000000b10000000000b1000000000000000000b3435363930000b162273737373737373737374711000061000000110000b100b302b20000006182000000000000000000000000005600005252338282828201a31222225252525262820000a20011111100008283425252
+0000000000000093a382824252525252000061000011000000000011000000001100000000000000000000020182001152222222222222222222222232b200000000b302b200000000b10000000000a200000000000000009300000000000000846282828283828282132323528452526292000000112434440000a282425284
+00000000000000a2828382428452525200000000b302b2936100b302b20061007293a30000000000000000b1a282931252845252525252232323232362b20000000000b10000001100000000000000000000000093000086820000a3000000005262828201a200a282829200132323236211111111243535450000b312525252
+00000000000000008282821323232323820000a300b1a382930000b100000000738283931100000000000011a382821323232323528462829200a20173b20061000000000000b302b2000061000000000000a385828286828282828293000000526283829200000000a20000000000005222222232263636460000b342525252
+00000011111111a3828201b1b1b1b1b182938282930082820000000000000000b100a282721100000000b372828283b12222223213233361000086920000000000100000000000b1000000000000000086938282828201920000a20182a37686526282829300000000000000000000005252845252328283920000b342845252
+00008612222232828382829300000000828282828283829200000000000061001100a382737200000000b373a2829211525284628382a2000000a2000000000000021111111111111111111111110061828282a28382820000000000828282825262829200000000000000000000000052525252526201a2000000b342525252
+00000113235252225353536300000000828300a282828201939300001100000072828292b1039300000000b100a282125223526292000000000000a3000000000043535353535353535353535363b2008282920082829200061600a3828382a28462000000000000000000000000000052845252526292000011111142525252
+0000a28282132362b1b1b1b1000000009200000000a28282828293b372b2000073820100110382a30000001100828213621013336100000000000082930000000002828382828202828282828272b20083820000a282d3000717f38282920000526200000000000093000000000000005252525284620000b312223213528452
+000000828392b30300000000002100000000000000000082828282b303b20000b1a282837203820193000072a38292b16271000000000000930000838200000000b1a282820182b1a28283a28273b200828293000082122232122232820000a3233300000000000082920000000000002323232323330000b342525232135252
+000000a28200b37300000000a37200000010000000111111118283b373b200a300008282730392008283007382830011629300000000000082000082829200000000009261a28200008261008282000001920000000213233342846282243434000000000000000082000085860000008382829200000000b342528452321323
+0000100082000082000000a2820300002222321111125353630182829200008300009200b1030000a28200008282001262829200000000a3829200828200000000858600008282a3828293008292610082001000001222222252525232253535000000f3100000a3820000a2010000008292000000009300b342525252522222
+0400122232b200839321008683039300528452222262c000a28282820000a38210000000a3738000008293008292001362820000000000828300a3820100000000a282828292a2828283828282000000343434344442528452525252622535350000001263000083829300008200c1008210d3e300a38200b342525252845252
+1232425262b28682827282820103820052525252846200000082829200008282320000008382930000a28201820000b1628393000000008282008282829300000000008382000000a28201820000000035353535454252525252528462253535000000032444008282820000829300002222223201828393b342525252525252
+525252525262b2b1b1b1132323526200845223232323232352522323233382825252525252525252525284522333b2822323232323526282820000b34252525252845252525252848452525262838242528452522333828292425223232352520000000000000000000000000000000000000000000000000000000000000000
+525252845262b2000000b1b1b142620023338276000000824233b2a282018283525252845252232323235262b1b10083921000a382426283920000b3422323232323232323232323232323526201821352522333b1b1018241133383828242840000000000000000000000000000000000000000000000000000000000000000
+525252525262b20000000000a242627682828392000011a273b200a382729200525252525233b1b1b1b11333000000825353536382426282410000b30382a2a2a1829200a2828382820182426200a2835262b1b10000831232b2000080014252000000000000a300000000000000000000000000000000000000000000000000
+528452232333b20000001100824262928201a20000b3720092000000830300002323525262b200000000b3720000a382828283828242522232b200b373928000000100110092a2829211a2133300a3825262b2000000a21333b20000868242520000000000000100009300000000000000000000000000000000000000000000
+525262122232b200a37672b2a24262838292000000b30300000000a3820300002232132333b200000000b303829300a2838292019242845262b200000000000000a2b302b2a36182b302b200110000825262b200000000b1b10000a283a2425200000000a30082000083000000000000000000000094a4b4c4d4e4f400000000
+525262428462b200a28303b2214262928300000000b3030000000000a203e3415252222232b200000000b30392000000829200000042525262b2000000000000000000b100a2828200b100b302b211a25262b200000000000000000092b3428400000000827682000001009300000000000000000095a5b5c5d5e5f500000000
+232333132362b221008203b2711333008293858693b3031111111111114222225252845262b200001100b303b2000000821111111142528462b2000000000000000000000000110176851100b1b3026184621111111100000061000000b3135200000000828382670082768200000000000000000096a6b6c6d6e6f600000000
+82000000a203117200a203b200010193828283824353235353535353535252845252525262b200b37200b303b2000000824353535323235262b20000110000000000000000b30282828372b26100b100525232122232b200000000000000b14200000000a28282123282839200000000000000000097a7b7c7d7e7f700000000
+9200110000135362b2001353535353539200a2000001828282829200b34252522323232362b261b30300b3030000000092b1b1b1b1b1b34262b200b372b20000001100000000b1a2828273b200000000232333132333b200001111000000b342000000868382125252328293a300000000000000000000000000000000000000
+00b372b200a28303b2000000a28293b3000000000000a2828382827612525252b1b1b1b173b200b30393b30361000000000000000000b34262b271b303b20000b302b211000000110092b100000000a3b1b1b1b1b1b10011111232110000b342000000a282125284525232828386000000000000000000000000000000000000
+80b303b20000820311111111008283b311111111110000829200928242528452000000a3820000b30382b37300000000000000000000b3426211111103b2000000b1b302b200b372b200000000000082b21000000000b31222522363b200b3138585868292425252525262018282860000000000000000000000000000000000
+00b373b20000a21353535363008292b32222222232111102b20000a21323525200000001839200b3038282820000000011111111930011425222222233b20000100000b10000b303b200000000858682b27100000000b3425233b1b1000000b182018283001323525284629200a2820000000000000000000000000000000000
+9300b100000000b1b1b1b1b100a200b323232323235363b100000000b1b1135200000000820000b30382839200000000222222328283432323232333b2000000329300000000b373b200000000a20182111111110000b31333b100a30061000000a28293f3123242522333020000820000000000000000000000000000000000
+829200001000410000000000000000b39310d30000a28200000000000000824200000086827600b30300a282760000005252526200828200a30182a2006100a362820000000000b100000093a382838222222232b20000b1b1000083000000860000122222526213331222328293827600000000000000000000000000000000
+017685a31222321111111111002100b322223293000182930000000080a301131000a383829200b373000083920000005284526200a28282828392000000008262839321000000000000a3828282820152845262b261000093000082a300a3821000135252845222225252523201838200000000000000000000000000000000
+828382824252522222222232007100b352526282a38283820000000000838282320001828200000083000082010000005252526271718283820000000000a382628201729300000000a282828382828252528462b20000a38300a382018283821222324252525252525284525222223200000000000000000000000000000000
+'''.replace('\n', '')
 
   @property
   def map_data(self):
@@ -694,17 +879,17 @@ b302b211000000110092b100000000a3b1b1b1b1b1b10011111232110000b342000000a282125284
   def __str__(self):
     spikes = {17: 'ʌʌ', 27: 'vv', 43: '> ', 59: ' <'}
     objs = {
-      g.spring: 'ΞΞ',
-      g.fall_floor: '▒▒',
-      g.balloon: '()',
-      g.key: '¤¬',
-      g.chest: '╔╗',
-      g.fruit: '{}',
-      g.fly_fruit: '{}',
-      g.fake_wall: '▓▓',
-      g.platform: 'oo',
-      g.player: ':D',
-      g.player_spawn: ':D'
+      self.spring: 'ΞΞ',
+      self.fall_floor: '▒▒',
+      self.balloon: '()',
+      self.key: '¤¬',
+      self.chest: '╔╗',
+      self.fruit: '{}',
+      self.fly_fruit: '{}',
+      self.fake_wall: '▓▓',
+      self.platform: 'oo',
+      self.player: ':D',
+      self.player_spawn: ':D'
     }
     # init map
     map_str = (['  '] * 16 + ['\n']) * 16
@@ -712,10 +897,10 @@ b302b211000000110092b100000000a3b1b1b1b1b1b10011111232110000b342000000a282125284
     for tx in range(16):
       for ty in range(16):
         pos = tx + 17 * ty
-        tile = p8.mget(self.room.x * 16 + tx, self.room.y * 16 + ty)
-        if p8.fget(tile, 4):
+        tile = self.p8.mget(self.room.x * 16 + tx, self.room.y * 16 + ty)
+        if self.p8.fget(tile, 4):
           map_str[pos] = '░░'
-        elif p8.fget(tile, 0):
+        elif self.p8.fget(tile, 0):
           map_str[pos] = '██'
         elif tile in spikes:
           map_str[pos] = spikes[tile]
@@ -728,12 +913,12 @@ b302b211000000110092b100000000a3b1b1b1b1b1b10011111232110000b342000000a282125284
         if ox >= 0 and ox <= 15 and oy >= 0 and oy <= 15:
           map_str[pos] = objs[type(o)]
           # draw bigger objs (e.g., clouds)
-          if type(o) == g.platform and ox + 1 <= 15:
+          if type(o) == self.platform and ox + 1 <= 15:
             map_str[pos + 1] = objs[type(o)]
-          elif type(o) == g.fly_fruit:
+          elif type(o) == self.fly_fruit:
             if ox - 1 >= 0: map_str[pos - 1] = ' »'
             if ox + 1 <= 15: map_str[pos + 1] = '« '
-          elif type(o) == g.fake_wall:
+          elif type(o) == self.fake_wall:
             if ox + 1 <= 15: map_str[pos + 1] = objs[type(o)]
             if oy + 1 <= 15: map_str[pos + 17] = objs[type(o)]
             if ox + 1 <= 15 and oy + 1 <= 15: map_str[pos + 18] = objs[type(o)]

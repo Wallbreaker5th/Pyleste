@@ -1,6 +1,9 @@
 # Contents
 
 * [Pyleste](#pyleste)
+  * [Rendering](#rendering)
+  * [Saving and loading state](#saving-and-loading-state)
+  * [Running several games at once](#running-several-games-at-once)
 * [Searcheline](#searcheline)
   * [Example - 2100m](#example---2100m)
   * [Example - 100m](#example---100m)
@@ -97,6 +100,50 @@ for f in range(20):
 [player] x: 106, y: 112, rem: {0.3500, 0.0000}, spd: {1.0000, 0.0000}
 [player] x: 108, y: 112, rem: {0.3500, 0.0000}, spd: {1.0000, 0.0000}
 [player] x: 110, y: 112, rem: {0.3500, 0.0000}, spd: {1.0000, 0.0000}
+```
+
+# Rendering
+`PICO8.render()` draws the current game state and returns it as a 128x128 [Pillow](https://python-pillow.org/) image, using the PICO-8 palette (indexes 0-15, see `PICO8.PALETTE`). Nothing is drawn while stepping, so simulating stays fast and a picture can be taken whenever one is needed:
+
+```python
+image = p8.render() # 128x128, palette ("P") mode
+image = p8.render(scale=4) # nearest-neighbour upscale, 512x512
+image.save('frame.png')
+
+p8.save_render('frame.png', scale=4) # render straight to a file
+png_bytes = p8.render_png() # for sending somewhere
+```
+
+Drawn are the room's background and terrain map layers plus every object (maddy, spikes, springs, crates, cloud platforms, balloons, ...) with its sprite. Effects that the emulator does not simulate - clouds, particles, maddy's hair, screen shake and the summit effects - are not drawn.
+
+# Saving and loading state
+The game state (room, objects, timers) is separate from the emulator: `get_state()` returns a `GameState`, which references neither the game nor the console it came from, so it can be kept around, copied, written to a file and loaded back into the same - or another - PICO-8 instance. Button presses are not part of a state.
+
+```python
+from GameState import GameState
+
+state = p8.get_state() # snapshot
+p8.set_state(state) # restore
+
+p8.save_state('states/100m.json') # or: state.save('states/100m.json')
+p8.load_state('states/100m.json')
+
+state = GameState.load('states/100m.json')
+print(state.room, len(state.objects), state.attrs)
+```
+
+# Running several games at once
+Nothing is global: each `PICO8` instance owns its cart, memory, screen and game state, so any number of games can be simulated (and rendered) side by side.
+
+```python
+a, b = PICO8(Celeste), PICO8(Celeste)
+utils.load_room(a, 0)
+utils.load_room(b, 20)
+for a_input, b_input in zip(inputs_a, inputs_b):
+  a.set_btn_state(a_input)
+  b.set_btn_state(b_input)
+  a.step()
+  b.step()
 ```
 
 # Searcheline

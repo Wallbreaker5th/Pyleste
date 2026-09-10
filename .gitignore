@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+
+# example output (see ExampleRender.py)
+renders/
+saves/
