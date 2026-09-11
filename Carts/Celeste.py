@@ -241,6 +241,8 @@ class Celeste():
       self.spd.y = -4
       self.state = 0
       self.delay = 0
+      self.djump = self.game.max_djump
+      self.game.create_hair(self)
 
     def update(self):
       # jumping up
@@ -268,6 +270,7 @@ class Celeste():
         if self.delay < 0:
           self.game.destroy_object(self)
           self.game.init_object(self.game.player, self.x, self.y)
+      self.game.move_hair(self)
 
   class player(base_obj):
     def init(self):
@@ -275,7 +278,7 @@ class Celeste():
       self.p_dash = False
       self.grace = 0
       self.jbuffer = 0
-      self.djump = 1
+      self.djump = self.game.max_djump
       self.dash_time = 0
       self.dash_effect_time = 0
       self.dash_target = Vector(0.0, 0.0)
@@ -285,6 +288,7 @@ class Celeste():
       # [change] animation state, used when rendering
       self.spr = 1
       self.spr_off = 0.0
+      self.game.create_hair(self)
 
     def update(self):
       # horizontal input
@@ -394,6 +398,10 @@ class Celeste():
         self.spr = 1 + int(self.spr_off % 4) # walk
       else:
         self.spr = 1 # stand
+
+      # [change] vanilla moves the hair in its draw loop, this moves it here so
+      # that rendering a frame never changes the simulation
+      self.game.move_hair(self)
 
       # exit level off the top
       if self.y < -4:
@@ -667,7 +675,8 @@ class Celeste():
   # draw the current game state onto the console's screen
   # this is what the render interface (PICO8.render) uses; it does not touch
   # the simulation (vanilla draws clouds, particles and maddy's hair from its
-  # draw loop, Pyleste does not simulate those)
+  # draw loop; the hair points are moved in player.update, the clouds and
+  # particles are not simulated at all)
   def _render(self):
     p8 = self.p8
     p8.cls(0) # background
@@ -686,7 +695,13 @@ class Celeste():
   def draw_object(self, obj):
     if obj is None or not obj.spr:
       return
-    if type(obj) == self.fake_wall:
+    if type(obj) == self.player or type(obj) == self.player_spawn:
+      # vanilla's player draw: set_hair_color, draw_hair, sprite, unset
+      self.p8.pal(8, self.hair_color(obj.djump))
+      self.draw_hair(obj)
+      self.p8.spr(obj.spr, obj.x, obj.y, 1, 1, obj.flip.x, obj.flip.y)
+      self.p8.pal()
+    elif type(obj) == self.fake_wall:
       self.p8.spr(obj.spr, obj.x, obj.y, 2, 2) # 2x2 blocks
     elif type(obj) == self.platform:
       self.p8.spr(11, obj.x, obj.y - 1, 2, 1) # cloud platform
@@ -697,6 +712,36 @@ class Celeste():
       self.p8.spr(wing, obj.x + 6, obj.y - 2)
     else:
       self.p8.spr(obj.spr, obj.x, obj.y, 1, 1, obj.flip.x, obj.flip.y)
+
+  # maddy's hair, as in vanilla (create_hair, draw_hair, set_hair_color)
+
+  # five points that start at the object's position
+  def create_hair(self, obj):
+    obj.hair = [Vector(obj.x, obj.y) for _ in range(5)]
+
+  # each point chases the one before it, 1.5 frames behind the head
+  def move_hair(self, obj):
+    last = Vector(obj.x + (6 if obj.flip.x else 2),
+                  obj.y + (4 if self.p8.btn(self.k_down) else 3))
+    for h in obj.hair:
+      h.x += (last.x - h.x) / 1.5
+      h.y += (last.y + 0.5 - h.y) / 1.5
+      last = h
+
+  # circles that get smaller towards the tail, drawn in colour 8 (remapped)
+  def draw_hair(self, obj):
+    for i, h in enumerate(obj.hair):
+      self.p8.circfill(h.x, h.y, self.clamp(4 - (i + 1), 1, 2), 8)
+
+  # the colour that colour 8 is remapped to while the hair is drawn: red while
+  # there is a dash in hand, a white/green flash while a spent dash is not
+  # refilled yet, blue once there is none left
+  def hair_color(self, djump):
+    if djump == 1:
+      return 8
+    if djump == 2:
+      return 7 if self.frames % 6 < 3 else 11
+    return 12
 
   # [change] sprite sheet (128x128 pixels, one hex digit per pixel), from the cart's __gfx__ section
   @property

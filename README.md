@@ -114,7 +114,7 @@ p8.save_render('frame.png', scale=4) # render straight to a file
 png_bytes = p8.render_png() # for sending somewhere
 ```
 
-Drawn are the room's background and terrain map layers plus every object (maddy, spikes, springs, crates, cloud platforms, balloons, ...) with its sprite. Effects that the emulator does not simulate - clouds, particles, maddy's hair, screen shake and the summit effects - are not drawn.
+Drawn are the room's background and terrain map layers plus every object (maddy, spikes, springs, crates, cloud platforms, balloons, ...) with its sprite, and maddy's hair (five points chasing the player, recoloured like the vanilla cart: red with a dash in hand, white/green while a spent dash is not refilled, blue with none left). Effects that the emulator does not simulate - clouds, particles, screen shake and the summit effects - are not drawn.
 
 # Saving and loading state
 The game state (room, objects, timers) is separate from the emulator: `get_state()` returns a `GameState`, which references neither the game nor the console it came from, so it can be kept around, copied, written to a file and loaded back into the same - or another - PICO-8 instance. Button presses are not part of a state.

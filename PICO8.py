@@ -36,6 +36,7 @@ class PICO8():
   def __init__(self, cart):
     self._btn_state = 0
     self._screen = None
+    self._pal = None
     self.load_game(cart)
 
   # game functions
@@ -96,18 +97,42 @@ class PICO8():
   def cls(self, color=0):
     self._screen = [color] * (SCREEN_W * SCREEN_H)
 
+  # remap a colour while drawing (pal(8, 12) draws everything that would be
+  # colour 8 in colour 12); pal() on its own clears the remapping again
+  def pal(self, c0=None, c1=None):
+    if c0 is None:
+      self._pal = None
+    else:
+      self._pal = dict(self._pal or {})
+      self._pal[c0] = c1
+
+  def _color(self, color):
+    return self._pal.get(color, color) if self._pal else color
+
   def pset(self, x, y, color):
     x, y = math.floor(x), math.floor(y)
     if 0 <= x < SCREEN_W and 0 <= y < SCREEN_H:
-      self._get_screen()[y * SCREEN_W + x] = color
+      self._get_screen()[y * SCREEN_W + x] = self._color(color)
 
   def rectfill(self, x1, y1, x2, y2, color):
     x1, y1 = max(0, math.floor(x1)), max(0, math.floor(y1))
     x2, y2 = min(SCREEN_W - 1, math.floor(x2)), min(SCREEN_H - 1, math.floor(y2))
+    color = self._color(color)
     screen = self._get_screen()
     for y in range(y1, y2 + 1):
       for x in range(x1, x2 + 1):
         screen[y * SCREEN_W + x] = color
+
+  # filled circle of radius r around (x, y)
+  def circfill(self, x, y, r, color):
+    color = self._color(color)
+    screen = self._get_screen()
+    for py in range(math.floor(y - r), math.floor(y + r) + 1):
+      for px in range(math.floor(x - r), math.floor(x + r) + 1):
+        if (px - x) ** 2 + (py - y) ** 2 > r * r:
+          continue
+        if 0 <= px < SCREEN_W and 0 <= py < SCREEN_H:
+          screen[py * SCREEN_W + px] = color
 
   # draw a (w x h) block of sprites, sprite 0 is the top-left of the sheet
   def spr(self, n, x, y, w=1, h=1, flip_x=False, flip_y=False):
@@ -128,7 +153,7 @@ class PICO8():
           continue # transparent
         px, py = x + i, y + j
         if 0 <= px < SCREEN_W and 0 <= py < SCREEN_H:
-          screen[py * SCREEN_W + px] = color
+          screen[py * SCREEN_W + px] = self._color(color)
 
   # draw a celw x celh area of the map, layer by layer
   # a tile belongs to every layer that its sprite flags name, so a tile is
